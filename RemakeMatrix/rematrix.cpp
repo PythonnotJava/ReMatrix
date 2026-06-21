@@ -17,7 +17,10 @@ Vector::Vector(Element* _data, int _length) {
     }
 }
 
-Vector::~Vector() = default;
+// [BugFix #1] 析构函数必须释放 data，否则内存泄漏
+Vector::~Vector() {
+    delete[] data;
+}
 
 Vector::Vector(const Vector &other) {
     this->length = other.length;
@@ -25,6 +28,18 @@ Vector::Vector(const Vector &other) {
     for (int i = 0; i < length; i++) {
         data[i] = other.data[i];
     }
+}
+
+// [BugFix #2] 赋值运算符深拷贝，防止浅拷贝导致 double-free / 数据串改
+Vector& Vector::operator=(const Vector &other) {
+    if (this == &other) return *this;
+    delete[] data;
+    this->length = other.length;
+    data = new Element[length];
+    for (int i = 0; i < length; i++) {
+        data[i] = other.data[i];
+    }
+    return *this;
 }
 
 Vector Vector::expand(int index, double k) {
@@ -60,13 +75,15 @@ bool Vector::isEqual(Vector &other) const {
     return false;
 }
 
+// [BugFix #3] 原实现使用默认构造 Vector()（只分配1个元素）再写入length个元素 → 越界
 Vector Vector::multi(Element k) {
-    auto temp =  Vector();
-    for (int i=0;i<length;i++){
-        temp.data[i] = data[i] * k;
+    auto _data = new Element[length];
+    for (int i = 0; i < length; i++) {
+        _data[i] = data[i] * k;
     }
-    temp.length = length;
-    return temp;
+    auto vec = Vector(_data, length);
+    delete[] _data;
+    return vec;
 }
 
 Vector Vector::add(Vector &other) {
@@ -289,9 +306,12 @@ bool Matrix::isSymmetric() {
     return true;
 }
 
+// [BugFix #4] 修复两处 bug:
+//   a) 边界检查 "row > this->_column-1" 应为 "col > this->_column-1"
+//   b) 构造子矩阵的 Vector 长度应为 this->_column-1 而非 this->_column（否则越界读取）
 Matrix Matrix::getRemainder(int row, int col) {
     if (this->_row <= 1 || this->_column <= 1) { error_models(6);exit(EXIT_FAILURE); }
-    if ((row < 0 || row > this->_row-1) || (col < 0 || row > this->_column-1))
+    if ((row < 0 || row > this->_row-1) || (col < 0 || col > this->_column-1))
     {
         error_models(6);
         exit(EXIT_FAILURE);
@@ -308,7 +328,7 @@ Matrix Matrix::getRemainder(int row, int col) {
                     index2++;
                 }
             }
-            auto temp = Vector(data, this->_column);
+            auto temp = Vector(data, this->_column - 1);
             delete[] data;
             vecs[index] = temp;
             index++;
@@ -393,10 +413,12 @@ bool Matrix::isEqual(Matrix &other) {
 
 bool Matrix::operator==(Matrix &other) { return isEqual(other);}
 
+// [BugFix #5] 下三角判断的 else 分支误写 spc.triUp = true，应为 spc.triDown = true
 bool Matrix::ifTriMatrix(bool if_up)  {
     if (!isSquare()) { error_models(4);exit(EXIT_FAILURE); }
     if (this->spc.unit){
         this->spc.triUp = true;
+        this->spc.triDown = true;
         return true;
     }
     if (if_up){
@@ -414,7 +436,7 @@ bool Matrix::ifTriMatrix(bool if_up)  {
                 if(this->_vecs[i].data[j] != 0)return false;
             }
         }
-        this->spc.triUp = true;
+        this->spc.triDown = true;   // ← 修复: 原为 triUp
         return true;
     }
 }
@@ -480,6 +502,9 @@ void Matrix::getElementaryTransposAdd(int lr1, int lr2, double k, bool if_line) 
     }
 }
 
+// [优化] 行列式计算
+// 保留对已知特殊矩阵（单位阵、三角阵、对角阵）的 O(1) 快速路径
+// 一般情况改为高斯消元（带列主元），O(n³) 替代原 O(n!) 递归代数余子式
 Element Matrix::det(){
     if (!isSquare()) { error_models(4);exit(EXIT_FAILURE); }
     if (this->spc.unit) {return 1;}
@@ -491,33 +516,75 @@ Element Matrix::det(){
         }return _sum;
     }
     elif(this->spc.digDown){
+        // [BugFix #6] 用整数运算计算符号，避免 pow(-1, 浮点数) 产生 NaN
         Element _sum = 1;
         for (int i=0;i< this->_row;i++)
         {
             _sum *= this->_vecs[i].data[this->_column-i-1] ;
-        }return _sum * pow(-1, 0.5 * this->_row * (this->_row-1));
-    }
-    // 未记录特殊情况
-    else{
-        if (this->_row == 1) { return this->_vecs[0].data[0]; }
-        elif (this->_row == 2) {
-            return this->_vecs[0].data[0] * this->_vecs[1].data[1] -
-                   this->_vecs[0].data[1] * this->_vecs[1].data[0];
-        } else {
-            Element _sum = 0;
-            for (int i = 0; i < this->_row; i++) {
-                // 以最后一行为基，取代数余子式
-                auto _mat = getRemainder(this->_row - 1, i);
-                Element k = power(-1, this->_row - 1 + i);
-                Element coef = this->_vecs[this->_row - 1].data[i] * k;
-                _sum += _mat.det() * coef;
-            }
-            return _sum;
         }
+        int n = this->_row;
+        int sign = ((n * (n - 1) / 2) % 2 == 0) ? 1 : -1;
+        return _sum * sign;
+    }
+    // 一般情况: 高斯消元法（带部分列主元），O(n³)
+    else{
+        int n = this->_row;
+        // 创建工作矩阵（栈上分配，n <= MAXCOUNT = 10）
+        Element mat[MAXCOUNT][MAXCOUNT];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                mat[i][j] = this->_vecs[i].data[j];
+            }
+        }
+
+        Element det_sign = 1;
+
+        for (int col = 0; col < n; col++) {
+            // 部分列主元: 选当前列中绝对值最大的行
+            int max_row = col;
+            Element max_val = fabs(mat[col][col]);
+            for (int row = col + 1; row < n; row++) {
+                if (fabs(mat[row][col]) > max_val) {
+                    max_val = fabs(mat[row][col]);
+                    max_row = row;
+                }
+            }
+
+            // 主元为零 → 奇异矩阵，行列式为 0
+            if (max_val < EPSILON) {
+                return 0;
+            }
+
+            // 交换行（记录符号变化）
+            if (max_row != col) {
+                for (int j = 0; j < n; j++) {
+                    Element temp = mat[col][j];
+                    mat[col][j] = mat[max_row][j];
+                    mat[max_row][j] = temp;
+                }
+                det_sign *= -1;
+            }
+
+            // 消元: 将当前列 col 下方元素消为 0
+            for (int row = col + 1; row < n; row++) {
+                Element factor = mat[row][col] / mat[col][col];
+                for (int j = col; j < n; j++) {
+                    mat[row][j] -= factor * mat[col][j];
+                }
+            }
+        }
+
+        // 行列式 = 符号 × 对角元素乘积
+        Element result = det_sign;
+        for (int i = 0; i < n; i++) {
+            result *= mat[i][i];
+        }
+        return result;
     }
 }
 
-bool Matrix::isSingularMat() { return det() == 0;}
+// [BugFix #7] 使用 EPSILON 进行浮点比较，避免因精度问题误判
+bool Matrix::isSingularMat() { return fabs(det()) < EPSILON;}
 
 Matrix Matrix::Zero(){
     auto _like_this = copy_mat(*this);
@@ -607,9 +674,13 @@ Matrix Matrix::innerMulti(Matrix & other) {
     return Matrix(vecs, this->_row, other._column);
 }
 
+// [优化] 逆矩阵求解
+// 保留特殊矩阵（单位阵、主/副对角阵）的 O(1)/O(n) 快速路径
+// 一般情况改为高斯-约旦消元法，O(n³) 替代原伴随矩阵法 O(n⁵)
+// [BugFix #8] 副对角线矩阵逆矩阵：修复索引错误（原来写入最后一列而非副对角线位置）
 Matrix Matrix::inv() {
-    // A_1 = 1/|A| * (A*)
-    if(det() == 0){ error_models(10);exit(EXIT_FAILURE);}
+    if (!isSquare()) { error_models(4);exit(EXIT_FAILURE); }
+    if(isSingularMat()){ error_models(10);exit(EXIT_FAILURE);}
     if (this->spc.unit) {return copy_mat(*this);}
     elif (this->spc.digUp){
         auto _zero = Zero();
@@ -617,18 +688,86 @@ Matrix Matrix::inv() {
             _zero._vecs[i].data[i] = 1/ this->_vecs[i].data[i];
         }
         _zero.spc.digUp = true;
-        _zero.spc.unit = true;
+        _zero.spc.symmetry = true;
         return _zero;
     }
     elif(this->spc.digDown){
+        // 副对角线矩阵的逆仍为副对角线矩阵
+        // A^{-1}[i][n-1-i] = 1 / A[n-1-i][i]
         auto _zero = Zero();
-        for (int i=0;i< this->_row;i++){
-            _zero._vecs[i].data[this->_column-1] = 1/ this->_vecs[this->_column-i-1].data[this->_column-i-1];
+        int n = this->_row;
+        for (int i = 0; i < n; i++){
+            _zero._vecs[i].data[n - 1 - i] = 1.0 / this->_vecs[n - 1 - i].data[i];
         }
         _zero.spc.digDown = true;
         return _zero;
     }
-    else return getAccompanyT() * (1 / det());
+    else {
+        // 高斯-约旦消元法求逆，O(n³)
+        int n = this->_row;
+        // 增广矩阵 [A | I]，宽度 2n
+        Element aug[MAXCOUNT][MAXCOUNT * 2];
+
+        // 初始化增广矩阵
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                aug[i][j] = this->_vecs[i].data[j];
+            }
+            for (int j = 0; j < n; j++) {
+                aug[i][n + j] = (i == j) ? 1.0 : 0.0;
+            }
+        }
+
+        // 高斯-约旦消元（带部分列主元）
+        for (int col = 0; col < n; col++) {
+            // 选主元
+            int max_row = col;
+            Element max_val = fabs(aug[col][col]);
+            for (int row = col + 1; row < n; row++) {
+                if (fabs(aug[row][col]) > max_val) {
+                    max_val = fabs(aug[row][col]);
+                    max_row = row;
+                }
+            }
+
+            // 交换行
+            if (max_row != col) {
+                for (int j = 0; j < 2 * n; j++) {
+                    Element temp = aug[col][j];
+                    aug[col][j] = aug[max_row][j];
+                    aug[max_row][j] = temp;
+                }
+            }
+
+            // 主元归一化
+            Element pivot = aug[col][col];
+            for (int j = 0; j < 2 * n; j++) {
+                aug[col][j] /= pivot;
+            }
+
+            // 消去当前列的其他所有行
+            for (int row = 0; row < n; row++) {
+                if (row != col) {
+                    Element factor = aug[row][col];
+                    for (int j = 0; j < 2 * n; j++) {
+                        aug[row][j] -= factor * aug[col][j];
+                    }
+                }
+            }
+        }
+
+        // 从增广矩阵右半部分提取逆矩阵
+        auto vecs = new Vector[n];
+        for (int i = 0; i < n; i++) {
+            auto _data = new Element[n];
+            for (int j = 0; j < n; j++) {
+                _data[j] = aug[i][n + j];
+            }
+            vecs[i] = Vector(_data, n);
+            delete[] _data;
+        }
+        return Matrix(vecs, n, n);
+    }
 }
 
 Element Matrix::trace() const {

@@ -74,6 +74,11 @@ using namespace std;
 #define ROUND 0
 #endif
 
+// 浮点比较精度
+#ifndef EPSILON
+#define EPSILON 1e-10
+#endif
+
 // 优先创建向量类，有向量类可以更方便组成矩阵
 // Let's create Vector class firstly, so that we can make it easier to form matrices.
 
@@ -106,6 +111,9 @@ public:
 
     // 拷贝函数
     Vector(const Vector& other);
+
+    // 赋值运算符（深拷贝，修复��拷贝导致的内存安全问题）
+    Vector& operator=(const Vector& other);
 
     // 判断两个向量是否一样
     bool isEqual(Vector & other) const;
@@ -161,7 +169,7 @@ typedef struct _Splice{
 } Splice;
 
 // Special结构体
-// 用于记录这是一个特殊的矩阵，比如说对角阵、三角阵、在一些难乎其难的计算上
+// 用于记录���是一个特殊的矩阵，比如说对角阵、三角阵、在一些难乎其难的计算上
 // 但是前提是，该矩阵已经被你调用了如判断是不是方阵、对角阵等等等方法才会触发记录，否则默认全都不是
 // 比如说行列式计算，如果我们提前知道这是一个上三角矩阵、我们可以一步计算出（即O(1)复杂度）行列式值
 // 知道一个矩阵是对角矩阵，那它必定是三角矩阵等等
@@ -237,10 +245,8 @@ public:
     // 请区别于行列式的余子式
     Matrix getRemainder(int row, int col);
     // 获取行列式的值，前提是这是一个方阵
-    // 我的之前方法是使用代数余子式，一直递归到二阶余子式
-    // 逆序排列法求值，和上面方法一样，都是超级耗时的工作，时间复杂度为O(n!)
-    // 我有考虑化为三角矩阵法，但是这样虽然显著的降低了时间复杂度，但是需要考虑更多因素了
-    // 因为传入的方阵不会太大，我决定使用代数余子式法
+    // [优化] 使用高斯消元法（带部分主元），时间复杂度从 O(n!) 降为 O(n³)
+    // 保留了对已知特殊矩阵（单位阵、三角阵、对角阵）的 O(1) 快速路径
     Element det();
     // 判断矩阵是不是上（下）三角矩阵，传入if_up=true表示判断是不是上三角矩阵，反之
     // 前提是方阵
@@ -257,7 +263,7 @@ public:
     // 第二种求伴随矩阵的方法
     Matrix getAccompanyT();
     // 求解逆矩阵
-    // 根据 AA* = |A|E
+    // [优化] 使用高斯-约旦消元法，时间复杂度从 O(n⁵) 降为 O(n³)
     Matrix inv();
     // 获取同形状零矩阵
     Matrix Zero();
